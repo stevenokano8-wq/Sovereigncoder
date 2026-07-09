@@ -112,7 +112,8 @@ export async function initDb(): Promise<DatabaseStatus> {
 
     await pgClient.query(`
       ALTER TABLE messages
-        ADD COLUMN IF NOT EXISTS smart_summary TEXT;
+        ADD COLUMN IF NOT EXISTS smart_summary TEXT,
+        ADD COLUMN IF NOT EXISTS image TEXT;
     `);
 
     await pgClient.query(`
@@ -167,7 +168,8 @@ export async function getMessages(): Promise<Message[]> {
       content: row.content,
       timestamp: row.timestamp,
       taskId: row.task_id || undefined,
-      smartSummary: row.smart_summary ? JSON.parse(row.smart_summary) : undefined
+      smartSummary: row.smart_summary ? JSON.parse(row.smart_summary) : undefined,
+      image: row.image || undefined
     }));
   } catch (err) {
     console.error("Failed to query messages from Postgres:", err);
@@ -185,14 +187,15 @@ export async function addMessage(msg: Message): Promise<void> {
 
   try {
     await pgClient!.query(
-      "INSERT INTO messages (id, role, content, timestamp, task_id, smart_summary) VALUES ($1, $2, $3, $4, $5, $6)",
+      "INSERT INTO messages (id, role, content, timestamp, task_id, smart_summary, image) VALUES ($1, $2, $3, $4, $5, $6, $7)",
       [
         msg.id,
         msg.role,
         msg.content,
         msg.timestamp,
         msg.taskId || null,
-        msg.smartSummary ? JSON.stringify(msg.smartSummary) : null
+        msg.smartSummary ? JSON.stringify(msg.smartSummary) : null,
+        msg.image || null
       ]
     );
   } catch (err) {

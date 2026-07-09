@@ -522,25 +522,56 @@ export default function CodeView({ files, onUpdateFile, initialSelectedPath, onR
 
             {/* Editor Body */}
             <div className="flex-1 relative flex overflow-hidden min-h-[350px]">
-              {/* Line numbers mock column */}
-              <div className="bg-gray-920 text-gray-600 px-2 md:px-3.5 py-4 select-none font-mono text-[10px] md:text-xs text-right border-r border-gray-900 space-y-[4px]">
-                {Array.from({ length: Math.max(15, editorContent.split("\n").length) }).map((_, i) => (
-                  <div key={i}>{i + 1}</div>
-                ))}
-              </div>
-              
               {isEditing ? (
-                <textarea
-                  id="textarea-code-editor"
-                  value={editorContent}
-                  onChange={(e) => setEditorContent(e.target.value)}
-                  className="flex-1 w-full h-full bg-transparent text-gray-100 p-4 font-mono text-[11px] md:text-xs focus:outline-none resize-none leading-relaxed space-y-[4px]"
-                  spellCheck="false"
-                />
+                <>
+                  {/* Line numbers mock column */}
+                  <div className="bg-gray-920 text-gray-600 px-2 md:px-3.5 py-4 select-none font-mono text-[10px] md:text-xs text-right border-r border-gray-900 space-y-[4px]">
+                    {Array.from({ length: Math.max(15, editorContent.split("\n").length) }).map((_, i) => (
+                      <div key={i}>{i + 1}</div>
+                    ))}
+                  </div>
+                  <textarea
+                    id="textarea-code-editor"
+                    value={editorContent}
+                    onChange={(e) => setEditorContent(e.target.value)}
+                    className="flex-1 w-full h-full bg-transparent text-gray-100 p-4 font-mono text-[11px] md:text-xs focus:outline-none resize-none leading-relaxed space-y-[4px]"
+                    spellCheck="false"
+                  />
+                </>
+              ) : selectedFile.path.endsWith(".png") || selectedFile.path.endsWith(".jpg") || selectedFile.path.endsWith(".jpeg") || selectedFile.content.startsWith("data:image/") ? (
+                <div className="flex-1 flex flex-col items-center justify-center bg-gray-900/10 p-6 overflow-auto">
+                  <div className="bg-white p-4 rounded-3xl shadow-xl border border-gray-100/50 max-w-full max-h-[350px] flex items-center justify-center overflow-hidden">
+                    <img
+                      src={selectedFile.content.startsWith("data:image/") ? selectedFile.content : `data:image/png;base64,${selectedFile.content}`}
+                      alt={selectedFile.path}
+                      referrerPolicy="no-referrer"
+                      className="max-w-full max-h-[300px] object-contain rounded-2xl"
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono text-gray-400 mt-3 uppercase tracking-wider">{selectedFile.path} • Visual Asset</span>
+                </div>
+              ) : selectedFile.path.endsWith(".svg") || selectedFile.content.trim().startsWith("<svg") ? (
+                <div className="flex-1 flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-gray-900 bg-gray-950 overflow-hidden min-h-[350px]">
+                  <div className="flex-1 flex flex-col items-center justify-center bg-gray-900/20 p-6 overflow-auto">
+                    <div className="bg-white/5 p-4 rounded-3xl border border-white/5 max-w-full max-h-[250px] flex items-center justify-center overflow-hidden" dangerouslySetInnerHTML={{ __html: selectedFile.content }} />
+                    <span className="text-[10px] font-mono text-gray-400 mt-3 uppercase tracking-wider">Vector Preview (SVG)</span>
+                  </div>
+                  <pre className="flex-1 p-4 overflow-y-auto leading-relaxed text-[11px] md:text-xs font-mono text-gray-200 select-text scrollbar-thin">
+                    <code>{selectedFile.content}</code>
+                  </pre>
+                </div>
               ) : (
-                <pre className="flex-1 p-4 overflow-y-auto leading-relaxed text-[11px] md:text-xs font-mono text-gray-200 select-text scrollbar-thin">
-                  <code>{selectedFile.content}</code>
-                </pre>
+                <>
+                  {/* Line numbers mock column */}
+                  <div className="bg-gray-920 text-gray-600 px-2 md:px-3.5 py-4 select-none font-mono text-[10px] md:text-xs text-right border-r border-gray-900 space-y-[4px]">
+                    {Array.from({ length: Math.max(15, editorContent.split("\n").length) }).map((_, i) => (
+                      <div key={i}>{i + 1}</div>
+                    ))}
+                  </div>
+                  <pre className="flex-1 p-4 overflow-y-auto leading-relaxed text-[11px] md:text-xs font-mono text-gray-200 select-text scrollbar-thin">
+                    <code>{selectedFile.content}</code>
+                  </pre>
+                </>
               )}
             </div>
           </>

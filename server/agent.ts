@@ -87,7 +87,7 @@ function classifyRequest(userPrompt: string): { isSimple: boolean; softMatches: 
 // no backend/database/setup work. If the model still returns backend-flavored subtasks
 // for a request that never asked for them, we flag the plan so the UI can ask the user
 // for approval before any of that extra work is executed.
-export async function planBuildTasks(userPrompt: string, useThinking?: boolean): Promise<Task[]> {
+export async function planBuildTasks(userPrompt: string, useThinking?: boolean, image?: string): Promise<Task[]> {
   const { isSimple, softMatches } = classifyRequest(userPrompt);
 
   let parsedTasks: Task[];
@@ -97,14 +97,30 @@ export async function planBuildTasks(userPrompt: string, useThinking?: boolean):
     const shouldThink = useThinking || !isSimple;
     const modelName = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
     
-    console.log(`Planning build tasks using Gemini with model: ${modelName} (classified as ${isSimple ? "simple" : "complex"}, shouldThink: ${shouldThink})`);
+    console.log(`Planning build tasks using Gemini with model: ${modelName} (classified as ${isSimple ? "simple" : "complex"}, shouldThink: ${shouldThink}, hasImage: ${!!image})`);
 
-    const contents = isSimple
+    const instructionText = isSimple
       ? `You are Sovereign Agent, a precise coding assistant. The user's request is small and self-contained: "${userPrompt}".
       Break it down into EXACTLY 1 task with 2-3 short, concrete subtasks that only touch the filesystem/UI needed for this exact request.
       Do NOT invent backend, API, database, authentication, or server setup work — the user did not ask for any of that.`
       : `You are Sovereign Agent, an expert full-stack developer. Break down this request into exactly 3 key developmental tasks. Each task should have exactly 3-4 subtasks.
       Request: "${userPrompt}"`;
+
+    const contentsParts: any[] = [];
+    if (image) {
+      const match = image.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
+      if (match) {
+        const mimeType = match[1];
+        const base64Data = match[2];
+        contentsParts.push({
+          inlineData: {
+            mimeType,
+            data: base64Data
+          }
+        });
+      }
+    }
+    contentsParts.push({ text: instructionText });
 
     const config: any = {
       responseMimeType: "application/json",
@@ -146,7 +162,7 @@ export async function planBuildTasks(userPrompt: string, useThinking?: boolean):
 
     const response = await ai.models.generateContent({
       model: modelName,
-      contents,
+      contents: contentsParts,
       config,
     });
 
@@ -283,10 +299,10 @@ function applyComplexityGuardrails(userPrompt: string, isSimple: boolean, tasks:
 
 // In-memory registry of plans that are paused, waiting on user approval before any
 // execution begins. Keyed by buildId.
-export const pendingApprovals = new Map<string, { prompt: string; tasks: Task[]; useThinking?: boolean }>();
+export const pendingApprovals = new Map<string, { prompt: string; tasks: Task[]; useThinking?: boolean; image?: string }>();
 
-export function registerPendingApproval(buildId: string, prompt: string, tasks: Task[], useThinking?: boolean) {
-  pendingApprovals.set(buildId, { prompt, tasks, useThinking });
+export function registerPendingApproval(buildId: string, prompt: string, tasks: Task[], useThinking?: boolean, image?: string) {
+  pendingApprovals.set(buildId, { prompt, tasks, useThinking, image });
 }
 
 export function getPendingApproval(buildId: string) {
@@ -299,7 +315,7 @@ export function clearPendingApproval(buildId: string) {
 
 // Background builder that executes subtasks sequentially
 // and writes real-time logs and generated files!
-export async function executeAgentBuild(prompt: string, tasks: Task[], useThinking?: boolean) {
+export async function executeAgentBuild(prompt: string, tasks: Task[], useThinking?: boolean, image?: string) {
   console.log(`Starting execution for prompt: ${prompt}`);
 
   // Broadcast to all connected clients that an agent run has started
@@ -340,39 +356,161 @@ export async function executeAgentBuild(prompt: string, tasks: Task[], useThinki
         if (stepIdx === 2) {
           try {
             const ai = getGeminiClient();
-            const filePrompt = `You are a professional full-stack developer. Write a fully-functional, beautiful, complete TypeScript React file, Express router, HTML, or schema file for the subtask: "${sub.name}" inside the larger project of: "${prompt}". Return ONLY the code, with no markdown tags, and no conversational text. Start with the code directly.`;
             
-            const shouldThink = useThinking || tasks.some(t => t.complexity === "complex");
-            const synthesisModel = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
-            const synthesisConfig: any = {};
-            if (shouldThink) {
-              synthesisConfig.thinkingConfig = {
-                thinkingLevel: ThinkingLevel.HIGH
-              };
+            const subNameLower = sub.name.toLowerCase();
+            const isImageRequest = 
+              subNameLower.includes("image") || 
+              subNameLower.includes("logo") || 
+              subNameLower.includes("icon") || 
+              subNameLower.includes("banner") || 
+              subNameLower.includes("illustration") || 
+              subNameLower.includes("design") ||
+              subNameLower.includes("drawing") ||
+              subNameLower.includes("graphic");
+
+            let fileContent = "";
+            let filePath = "";
+            let language = "typescript";
+            
+            if (isImageRequest) {
+              try {
+                sub.logs.push(`[SYSTEM] Detecting image design request. Attempting neural image generation with 'gemini-3.1-flash-lite-image'...`);
+                
+                const promptParts: any[] = [];
+                if (image) {
+                  const match = image.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
+                  if (match) {
+                    const mimeType = match[1];
+                    const base64Data = match[2];
+                    promptParts.push({
+                      inlineData: {
+                        mimeType,
+                        data: base64Data
+                      }
+                    });
+                  }
+                }
+                promptParts.push({
+                  text: `Generate or redesign a gorgeous, high-fidelity, creative visual asset or image for: "${prompt}", subtask: "${sub.name}".`
+                });
+
+                const imgRes = await ai.models.generateContent({
+                  model: 'gemini-3.1-flash-lite-image',
+                  contents: { parts: promptParts }
+                });
+
+                let foundImage = false;
+                if (imgRes.candidates?.[0]?.content?.parts) {
+                  for (const part of imgRes.candidates[0].content.parts) {
+                    if (part.inlineData?.data) {
+                      const base64 = part.inlineData.data;
+                      fileContent = `data:image/png;base64,${base64}`;
+                      const fileName = sub.name.toLowerCase().replace(/[^a-z0-9]/g, "_").substring(0, 20) + "_image.png";
+                      filePath = `src/generated/${fileName}`;
+                      language = "image";
+                      foundImage = true;
+                      sub.logs.push(`[SUCCESS] Neural image generation succeeded! Created raster PNG asset.`);
+                      break;
+                    }
+                  }
+                }
+                
+                if (!foundImage) {
+                  throw new Error("No image data found in response parts.");
+                }
+              } catch (imgErr: any) {
+                sub.logs.push(`[INFO] Neural image api fallback: ${imgErr.message}. Synthesizing a beautiful vector SVG image instead...`);
+                
+                const promptParts: any[] = [];
+                if (image) {
+                  const match = image.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
+                  if (match) {
+                    const mimeType = match[1];
+                    const base64Data = match[2];
+                    promptParts.push({
+                      inlineData: {
+                        mimeType,
+                        data: base64Data
+                      }
+                    });
+                  }
+                }
+                promptParts.push({
+                  text: `You are a professional designer. Design an incredibly beautiful, highly stylized, modern, responsive SVG vector graphic/image for the project: "${prompt}", subtask: "${sub.name}". Return ONLY valid SVG code, starting with <svg> and ending with </svg>, with no markdown blocks, and no conversational text. Include beautiful gradients, modern styling, clean shapes, and a highly professional aesthetic.`
+                });
+
+                const svgRes = await ai.models.generateContent({
+                  model: "gemini-3.5-flash",
+                  contents: promptParts
+                });
+
+                let svgContent = svgRes.text || "";
+                if (svgContent.startsWith("```")) {
+                  const lines = svgContent.split("\n");
+                  if (lines[0].startsWith("```")) lines.shift();
+                  if (lines[lines.length - 1].startsWith("```")) lines.pop();
+                  svgContent = lines.join("\n");
+                }
+                fileContent = svgContent;
+                const fileName = sub.name.toLowerCase().replace(/[^a-z0-9]/g, "_").substring(0, 20) + "_vector.svg";
+                filePath = `src/generated/${fileName}`;
+                language = "svg";
+                sub.logs.push(`[SUCCESS] Generated custom high-fidelity vector SVG asset.`);
+              }
+            } else {
+              // Standard code synthesis (image aware)
+              const promptParts: any[] = [];
+              if (image) {
+                const match = image.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
+                if (match) {
+                  const mimeType = match[1];
+                  const base64Data = match[2];
+                  promptParts.push({
+                    inlineData: {
+                      mimeType,
+                      data: base64Data
+                    }
+                  });
+                }
+              }
+              promptParts.push({
+                text: `You are a professional full-stack developer. Write a fully-functional, beautiful, complete TypeScript React file, Express router, HTML, or schema file for the subtask: "${sub.name}" inside the larger project of: "${prompt}". Use the uploaded image mockup (if present) to understand layout details, styling, and design preferences, then write code matching it precisely. Return ONLY the code, with no markdown tags, and no conversational text. Start with the code directly.`
+              });
+
+              const shouldThink = useThinking || tasks.some(t => t.complexity === "complex");
+              const synthesisModel = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+              const synthesisConfig: any = {};
+              if (shouldThink) {
+                synthesisConfig.thinkingConfig = {
+                  thinkingLevel: ThinkingLevel.HIGH
+                };
+              }
+
+              sub.logs.push(`[SYSTEM] Requesting AI code synthesis (model: ${synthesisModel}, shouldThink: ${shouldThink}, hasImageRef: ${!!image}) for code modules...`);
+              const fileRes = await ai.models.generateContent({
+                model: synthesisModel,
+                contents: promptParts,
+                config: synthesisConfig
+              });
+
+              let synthesizedCode = fileRes.text || "// AI Synthesis yielded empty code file.";
+              if (synthesizedCode.startsWith("```")) {
+                const lines = synthesizedCode.split("\n");
+                if (lines[0].startsWith("```")) lines.shift();
+                if (lines[lines.length - 1].startsWith("```")) lines.pop();
+                synthesizedCode = lines.join("\n");
+              }
+              fileContent = synthesizedCode;
+              
+              const fileName = sub.name.toLowerCase().replace(/[^a-z0-9]/g, "_").substring(0, 20) + (sub.name.includes("schema") ? "_schema.ts" : sub.name.includes("endpoint") || sub.name.includes("Express") ? "_api.ts" : "_component.tsx");
+              filePath = `src/generated/${fileName}`;
+              language = filePath.endsWith(".ts") || filePath.endsWith(".tsx") ? "typescript" : "html";
             }
 
-            sub.logs.push(`[SYSTEM] Requesting AI code synthesis (model: ${synthesisModel}, shouldThink: ${shouldThink}) for code modules...`);
-            const fileRes = await ai.models.generateContent({
-              model: synthesisModel,
-              contents: filePrompt,
-              config: synthesisConfig
-            });
-
-            let fileContent = fileRes.text || "// AI Synthesis yielded empty code file.";
-            // Strip any markdown code fence blocks if returned
-            if (fileContent.startsWith("```")) {
-              const lines = fileContent.split("\n");
-              if (lines[0].startsWith("```")) lines.shift();
-              if (lines[lines.length - 1].startsWith("```")) lines.pop();
-              fileContent = lines.join("\n");
-            }
-
-            const fileName = sub.name.toLowerCase().replace(/[^a-z0-9]/g, "_").substring(0, 20) + (sub.name.includes("schema") ? "_schema.ts" : sub.name.includes("endpoint") || sub.name.includes("Express") ? "_api.ts" : "_component.tsx");
-            const filePath = `src/generated/${fileName}`;
             const fileNode: FileNode = {
               path: filePath,
               content: fileContent,
-              language: filePath.endsWith(".ts") || filePath.endsWith(".tsx") ? "typescript" : "html"
+              language: language
             };
 
             await saveFile(fileNode);

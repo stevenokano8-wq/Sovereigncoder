@@ -57,6 +57,22 @@ export default function App() {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [dbStatus, setDbStatus] = useState<DatabaseStatus>({ postgres: "local_fallback", redis: "local_fallback" });
   const [inputText, setInputText] = useState("");
+  const [attachedImage, setAttachedImage] = useState<string | null>(null);
+  const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+  const [showLiveTerminal, setShowLiveTerminal] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachedImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   const [isSending, setIsSending] = useState(false);
   const [isThinkingMode, setIsThinkingMode] = useState(false);
   const [currentPrompt, setCurrentPrompt] = useState("");
@@ -354,17 +370,21 @@ export default function App() {
 
   const handleSendPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || isSending) return;
+    if ((!inputText.trim() && !attachedImage) || isSending) return;
 
     const userText = inputText;
+    const base64Image = attachedImage;
     setInputText("");
+    setAttachedImage(null);
     setIsSending(true);
+    setShowLiveTerminal(true);
 
     // Optimistically add user message
     const optimMsg: Message = {
       id: `msg-optim-${Date.now()}`,
       role: "user",
       content: userText,
+      image: base64Image || undefined,
       timestamp: new Date().toISOString()
     };
     setMessages(prev => [...prev, optimMsg]);
@@ -373,7 +393,7 @@ export default function App() {
       const res = await fetch("/api/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role: "user", content: userText, useThinking: isThinkingMode, sessionId: activeSessionId }),
+        body: JSON.stringify({ role: "user", content: userText, image: base64Image, useThinking: isThinkingMode, sessionId: activeSessionId }),
       });
 
       if (!res.ok) {
@@ -401,6 +421,9 @@ export default function App() {
 
   const handleApprovalDecision = async (buildId: string, approve: boolean) => {
     try {
+      if (approve) {
+        setShowLiveTerminal(true);
+      }
       const res = await fetch(`/api/tasks/${approve ? "approve" : "reject"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -738,7 +761,33 @@ export default function App() {
                   </motion.div>
 
                   {/* Centered Input Form for Welcome state */}
-                  <div className="w-full shrink-0 z-30">
+                  <div className="w-full shrink-0 z-30 space-y-3.5">
+                    {/* Welcome state Image Attachment Preview */}
+                    {attachedImage && (
+                      <div className="px-5 py-2 flex items-center gap-3 bg-white/80 backdrop-blur-md rounded-2xl border border-gray-150 shadow-sm max-w-sm mx-auto text-left animate-in fade-in slide-in-from-bottom-2 duration-200">
+                        <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-gray-200 bg-white shadow-xs group shrink-0">
+                          <img src={attachedImage} alt="Attachment thumbnail" referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => setAttachedImage(null)}
+                            className="absolute inset-0 bg-black/45 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white animate-in duration-100"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex-grow min-w-0">
+                          <div className="text-xs font-semibold text-gray-700 truncate">Image Attached</div>
+                          <div className="text-gray-400 font-mono text-[9px] truncate">Reference design mockup</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAttachedImage(null)}
+                          className="p-1 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-600 shrink-0"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </div>
+                    )}
                     <form 
                       onSubmit={handleSendPrompt}
                       className="bg-white rounded-full px-5 py-3.5 shadow-md hover:shadow-lg transition-shadow border border-gray-150 flex items-center gap-3"
@@ -746,7 +795,7 @@ export default function App() {
                       <button 
                         id="btn-input-plus"
                         type="button" 
-                        onClick={() => { alert("Uploading file/attachment triggers coming soon in workspace..."); }}
+                        onClick={() => fileInputRef.current?.click()}
                         className="p-1.5 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-700 transition-colors"
                       >
                         <Plus className="h-5 w-5" />
@@ -808,28 +857,43 @@ export default function App() {
                 </div>
               ) : (
                 /* Else, render the unified chronological chat and task feed! */
-                <div id="chat-thread-container" className="flex-1 flex flex-col min-h-0 max-w-4xl mx-auto w-full relative pb-4">
-                  {/* Stream Feed Header info */}
-                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-gray-150/70 shrink-0">
-                    <div className="flex items-center gap-2">
-                      <MessageSquare className="h-4.5 w-4.5 text-indigo-500 animate-pulse" />
-                      <span className="text-xs font-bold text-gray-700 font-mono uppercase tracking-wider">Workspace Execution Timeline</span>
+                <div id="chat-thread-container" className={`flex-grow flex flex-col md:flex-row min-h-0 w-full relative pb-4 gap-6 transition-all duration-300 ${showLiveTerminal ? "max-w-7xl mx-auto" : "max-w-4xl mx-auto"}`}>
+                  <div className="flex-1 flex flex-col min-h-0 w-full">
+                    {/* Stream Feed Header info */}
+                    <div className="flex items-center justify-between pb-3 mb-3 border-b border-gray-150/70 shrink-0">
+                      <div className="flex items-center gap-2">
+                        <MessageSquare className="h-4.5 w-4.5 text-indigo-500 animate-pulse" />
+                        <span className="text-xs font-bold text-gray-700 font-mono uppercase tracking-wider">Workspace Execution Timeline</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowLiveTerminal(prev => !prev)}
+                          className={`flex items-center gap-1.5 text-[10px] px-2.5 py-1.5 rounded-xl font-bold font-mono transition-all cursor-pointer ${
+                            showLiveTerminal 
+                              ? "bg-slate-900 text-emerald-400 border border-slate-800" 
+                              : "bg-slate-100 hover:bg-slate-200 text-gray-600 border border-slate-200"
+                          }`}
+                          title="Toggle Live Terminal Output Console"
+                        >
+                          <Terminal className="h-3.5 w-3.5" />
+                          <span>{showLiveTerminal ? "HIDE TERMINAL" : "LIVE TERMINAL"}</span>
+                        </button>
+
+                        <span className="hidden sm:flex items-center gap-1.5 text-[10px] text-emerald-600 font-mono">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
+                          SSE Pipeline {isConnectedSSE ? "ONLINE" : "OFFLINE"}
+                        </span>
+                        <button 
+                          id="btn-clear-chat"
+                          onClick={handleClearSession}
+                          className="text-gray-400 hover:text-red-500 p-1.5 hover:bg-gray-100 rounded-xl transition-all cursor-pointer"
+                          title="Purge session"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="flex items-center gap-1.5 text-[10px] text-emerald-600 font-mono">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
-                        SSE PIPELINE {isConnectedSSE ? "ONLINE" : "OFFLINE"}
-                      </span>
-                      <button 
-                        id="btn-clear-chat"
-                        onClick={handleClearSession}
-                        className="text-gray-400 hover:text-red-500 p-1.5 hover:bg-gray-100 rounded-xl transition-all cursor-pointer"
-                        title="Purge session"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
 
                   {/* 1. GLOBAL BLUEPRINT: MASTER TASK PLANS LIST (Phase 1) */}
                   {tasks.length > 0 && (
@@ -914,7 +978,18 @@ export default function App() {
                           return (
                             <div key={item.id} className="flex flex-col items-end w-full">
                               <div className="bg-[#e3edfa] text-slate-800 rounded-3xl rounded-tr-none px-6 py-4 max-w-[85%] shadow-xs leading-relaxed text-sm">
-                                {msg.content}
+                                <div className="whitespace-pre-wrap">{msg.content}</div>
+                                {msg.image && (
+                                  <div className="mt-2.5 rounded-2xl overflow-hidden border border-blue-200/50 shadow-sm max-w-[200px] max-h-[150px] flex items-center justify-center bg-white/50 p-1">
+                                    <img
+                                      src={msg.image}
+                                      alt="Attached image mockup"
+                                      referrerPolicy="no-referrer"
+                                      className="max-w-full max-h-[142px] object-contain rounded-xl cursor-zoom-in hover:scale-[1.03] transition-transform duration-250"
+                                      onClick={() => setFullscreenImage(msg.image)}
+                                    />
+                                  </div>
+                                )}
                               </div>
                               <span className="text-[10px] text-gray-400 mt-1.5 px-2 font-mono">
                                 User • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -1159,7 +1234,33 @@ export default function App() {
                   </div>
 
                   {/* Fixed bottom Input Bar */}
-                  <div className="w-full bg-slate-50/90 pt-3 pb-1 border-t border-gray-150/50 z-30 shrink-0">
+                  <div className="w-full bg-slate-50/90 pt-3 pb-1 border-t border-gray-150/50 z-30 shrink-0 space-y-2">
+                    {/* Image Attachment Preview */}
+                    {attachedImage && (
+                      <div className="px-5 py-2 flex items-center gap-3 bg-white border border-gray-150 rounded-2xl max-w-sm ml-5 text-left animate-in fade-in slide-in-from-bottom-2 duration-200">
+                        <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-gray-200 bg-white shadow-xs group shrink-0">
+                          <img src={attachedImage} alt="Attachment thumbnail" referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => setAttachedImage(null)}
+                            className="absolute inset-0 bg-black/45 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white animate-in duration-100"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex-grow min-w-0">
+                          <div className="text-xs font-semibold text-gray-700 truncate">Image Attached</div>
+                          <div className="text-gray-400 font-mono text-[9px] truncate">Reference design mockup</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAttachedImage(null)}
+                          className="p-1 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-600 shrink-0"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </div>
+                    )}
                     <form 
                       onSubmit={handleSendPrompt}
                       className="bg-white rounded-full px-5 py-3.5 shadow-md hover:shadow-lg transition-shadow border border-gray-150 flex items-center gap-3"
@@ -1167,7 +1268,7 @@ export default function App() {
                       <button 
                         id="btn-input-plus"
                         type="button" 
-                        onClick={() => { alert("Uploading file/attachment triggers coming soon in workspace..."); }}
+                        onClick={() => fileInputRef.current?.click()}
                         className="p-1.5 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-700 transition-colors"
                       >
                         <Plus className="h-5 w-5" />
@@ -1205,6 +1306,15 @@ export default function App() {
                       </button>
                     </form>
                   </div>
+                  
+                  </div>
+
+                  {/* Right Column: Collapsible Live Terminal */}
+                  {showLiveTerminal && (
+                    <div className="w-full md:w-[420px] lg:w-[480px] flex flex-col min-h-[300px] md:min-h-0 md:h-full transition-all duration-300 shrink-0">
+                      <TerminalLogsView tasks={tasks} files={files} dbStatus={dbStatus} />
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>
@@ -1509,6 +1619,52 @@ export default function App() {
               </div>
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* Hidden file input for attachment uploads */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleImageUpload}
+        accept="image/*"
+        className="hidden"
+      />
+
+      {/* Fullscreen Lightbox Modal */}
+      <AnimatePresence>
+        {fullscreenImage && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setFullscreenImage(null)}
+            className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-4 cursor-zoom-out"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative max-w-5xl max-h-[85vh] flex items-center justify-center overflow-hidden bg-white/5 rounded-3xl p-3 border border-white/10"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img
+                src={fullscreenImage}
+                alt="Enlarged Reference Mockup"
+                referrerPolicy="no-referrer"
+                className="max-w-full max-h-[80vh] object-contain rounded-2xl select-none"
+              />
+              <button
+                type="button"
+                onClick={() => setFullscreenImage(null)}
+                className="absolute top-4 right-4 bg-black/60 hover:bg-black/80 text-white rounded-full p-2.5 transition-colors focus:outline-none"
+                title="Close"
+              >
+                ✕
+              </button>
+            </motion.div>
+            <span className="text-white/60 font-mono text-xs mt-4 uppercase tracking-widest select-none">Click background to dismiss mockup</span>
+          </motion.div>
         )}
       </AnimatePresence>
 

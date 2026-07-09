@@ -47,7 +47,7 @@ app.get("/api/messages", async (req, res) => {
 // API: Add user message & trigger Sovereign Agent
 app.post("/api/messages", async (req, res) => {
   try {
-    const { role, content, useThinking, sessionId } = req.body;
+    const { role, content, image, useThinking, sessionId } = req.body;
     if (!content) {
       return res.status(400).json({ error: "Content is required" });
     }
@@ -56,6 +56,7 @@ app.post("/api/messages", async (req, res) => {
       id: `msg-${Date.now()}-user`,
       role: role || "user",
       content,
+      image: image || undefined,
       timestamp: new Date().toISOString(),
     };
 
@@ -178,7 +179,7 @@ app.post("/api/messages", async (req, res) => {
         }
 
         // Step 1: Generate Tasks and Subtasks list with Gemini (with fallback)
-        const plannedTasks = await planBuildTasks(content, useThinking);
+        const plannedTasks = await planBuildTasks(content, useThinking, image);
         
         // Save initial tasks to SQL relational store
         for (const task of plannedTasks) {
@@ -194,11 +195,11 @@ app.post("/api/messages", async (req, res) => {
         const needsApproval = plannedTasks.some(t => t.requiresApproval);
         if (needsApproval) {
           const buildId = plannedTasks.find(t => t.buildId)?.buildId || `build-${Date.now()}`;
-          registerPendingApproval(buildId, content, plannedTasks, useThinking);
+          registerPendingApproval(buildId, content, plannedTasks, useThinking, image);
           broadcastSSE("plan-awaiting-approval", { buildId, tasks: plannedTasks });
         } else {
           // Trigger background asynchronous compilation/synthesis worker
-          executeAgentBuild(content, plannedTasks, useThinking);
+          executeAgentBuild(content, plannedTasks, useThinking, image);
         }
 
         res.json({ message: userMsg, tasks: plannedTasks });
@@ -242,7 +243,7 @@ app.post("/api/tasks/approve", async (req, res) => {
     clearPendingApproval(buildId);
     broadcastSSE("plan-approved", { buildId });
 
-    executeAgentBuild(pending.prompt, approvedTasks, pending.useThinking);
+    executeAgentBuild(pending.prompt, approvedTasks, pending.useThinking, pending.image);
 
     res.json({ status: "success", tasks: approvedTasks });
   } catch (err: any) {

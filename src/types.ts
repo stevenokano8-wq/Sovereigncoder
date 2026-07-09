@@ -18,6 +18,7 @@ export interface Message {
   timestamp: string;
   taskId?: string; // If this message spawned a task
   smartSummary?: SmartSummary;
+  image?: string; // Attached base64 image data
 }
 
 export interface Task {
