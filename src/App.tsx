@@ -303,7 +303,10 @@ export default function App() {
 
     eventSource.addEventListener("build-finished", (e: any) => {
       const finishMsg = JSON.parse(e.data) as Message;
-      setMessages(prev => [...prev, finishMsg]);
+      setMessages(prev => {
+        if (prev.some(m => m.id === finishMsg.id)) return prev;
+        return [...prev, finishMsg];
+      });
       // Sync complete task tree
       fetchInitialData();
     });
@@ -551,7 +554,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans select-none overflow-x-hidden antialiased">
+    <div className="h-screen max-h-screen bg-slate-50 flex flex-col font-sans select-none overflow-hidden antialiased">
       
       {/* Top Banner Bar - matching screenshot exactly! */}
       <header className="bg-white border-b border-gray-100 px-3 sm:px-6 py-2.5 sm:py-4 flex items-center justify-between sticky top-0 z-40 shadow-xs gap-2">

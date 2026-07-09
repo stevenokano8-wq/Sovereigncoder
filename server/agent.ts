@@ -4,13 +4,15 @@ import { saveTask, saveFile, addMessage, getTasks } from "./db.js";
 import { redisSet, redisGet } from "./redis.js";
 
 let aiClient: GoogleGenAI | null = null;
+let currentApiKey: string | undefined = undefined;
 
 export function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      throw new Error("GEMINI_API_KEY environment variable is required. Please set it in the Settings panel.");
-    }
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    throw new Error("GEMINI_API_KEY environment variable is required. Please set it in the Settings panel.");
+  }
+  
+  if (!aiClient || currentApiKey !== key) {
     aiClient = new GoogleGenAI({
       apiKey: key,
       httpOptions: {
@@ -19,6 +21,7 @@ export function getGeminiClient(): GoogleGenAI {
         }
       }
     });
+    currentApiKey = key;
   }
   return aiClient;
 }
