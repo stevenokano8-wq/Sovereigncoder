@@ -22,7 +22,9 @@ import {
   Cpu,
   Shield,
   Clock,
-  Loader2
+  Loader2,
+  Brain,
+  Terminal
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Message, Task, FileNode, DatabaseStatus } from "./types.js";
@@ -39,6 +41,7 @@ import NotificationsView from "./components/NotificationsView.tsx";
 import ScreenshotsView from "./components/ScreenshotsView.tsx";
 import SettingsView from "./components/SettingsView.tsx";
 import SubtasksSimulationView from "./components/SubtasksSimulationView.tsx";
+import TerminalLogsView from "./components/TerminalLogsView.tsx";
 
 export default function App() {
   // Navigation State
@@ -55,7 +58,9 @@ export default function App() {
   const [dbStatus, setDbStatus] = useState<DatabaseStatus>({ postgres: "local_fallback", redis: "local_fallback" });
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [isThinkingMode, setIsThinkingMode] = useState(false);
   const [currentPrompt, setCurrentPrompt] = useState("");
+  const [focusedFilePath, setFocusedFilePath] = useState<string | null>(null);
 
   // System States
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -199,12 +204,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch initial data & connect to live stream
-  useEffect(() => {
-    fetchInitialData();
-    connectSSE();
-  }, []);
-
   // Auto-scroll chat on new message or task activity
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -241,102 +240,117 @@ export default function App() {
     }
   };
 
-  const connectSSE = () => {
-    console.log("Establishing Server-Sent Events real-time connection...");
-    const eventSource = new EventSource("/api/tasks/stream");
+  // Fetch initial data & connect to live stream with full cleanup & error retry management
+  useEffect(() => {
+    fetchInitialData();
 
-    eventSource.onopen = () => {
-      setIsConnectedSSE(true);
-      console.log("SSE Pipeline active.");
-    };
+    let activeEventSource: EventSource | null = null;
+    let retryTimeout: any = null;
 
-    eventSource.onerror = (e) => {
-      setIsConnectedSSE(false);
-      console.error("SSE connection dropped, retrying in 5s...", e);
-      eventSource.close();
-      setTimeout(connectSSE, 5000);
-    };
+    const connect = () => {
+      console.log("Establishing Server-Sent Events real-time connection...");
+      const eventSource = new EventSource("/api/tasks/stream");
+      activeEventSource = eventSource;
 
-    // Listen to events
-    eventSource.addEventListener("connected", (e: any) => {
-      const data = JSON.parse(e.data);
-      console.log("SSE Pipeline Handshake:", data);
-      if (data && data.status === "refreshed") {
+      eventSource.onopen = () => {
+        setIsConnectedSSE(true);
+        console.log("SSE Pipeline active.");
         fetchInitialData();
-      }
-    });
+      };
 
-    eventSource.addEventListener("build-started", (e: any) => {
-      const data = JSON.parse(e.data);
-      setCurrentPrompt(data.prompt);
-      // Clear tasks locally as new run begins
-      setTasks([]);
-    });
+      eventSource.onerror = (e) => {
+        setIsConnectedSSE(false);
+        console.warn("SSE connection temporarily interrupted. Browser is attempting auto-reconnect...", e);
+      };
 
-    eventSource.addEventListener("task-update", (e: any) => {
-      const updatedTask = JSON.parse(e.data) as Task;
-      setTasks(prevTasks => {
-        const idx = prevTasks.findIndex(t => t.id === updatedTask.id);
-        if (idx >= 0) {
-          const next = [...prevTasks];
-          next[idx] = updatedTask;
-          return next;
-        } else {
-          return [updatedTask, ...prevTasks];
+      // Listen to events
+      eventSource.addEventListener("connected", (e: any) => {
+        const data = JSON.parse(e.data);
+        console.log("SSE Pipeline Handshake:", data);
+        if (data && data.status === "refreshed") {
+          fetchInitialData();
         }
       });
-    });
 
-    eventSource.addEventListener("file-created", (e: any) => {
-      const newFile = JSON.parse(e.data) as FileNode;
-      setFiles(prevFiles => {
-        const idx = prevFiles.findIndex(f => f.path === newFile.path);
-        if (idx >= 0) {
-          const next = [...prevFiles];
-          next[idx] = newFile;
-          return next;
-        } else {
-          return [...prevFiles, newFile];
+      eventSource.addEventListener("build-started", (e: any) => {
+        const data = JSON.parse(e.data);
+        setCurrentPrompt(data.prompt);
+        // Clear tasks locally as new run begins
+        setTasks([]);
+      });
+
+      eventSource.addEventListener("task-update", (e: any) => {
+        const updatedTask = JSON.parse(e.data) as Task;
+        setTasks(prevTasks => {
+          const idx = prevTasks.findIndex(t => t.id === updatedTask.id);
+          if (idx >= 0) {
+            const next = [...prevTasks];
+            next[idx] = updatedTask;
+            return next;
+          } else {
+            return [updatedTask, ...prevTasks];
+          }
+        });
+      });
+
+      eventSource.addEventListener("file-created", (e: any) => {
+        const newFile = JSON.parse(e.data) as FileNode;
+        setFiles(prevFiles => {
+          const idx = prevFiles.findIndex(f => f.path === newFile.path);
+          if (idx >= 0) {
+            const next = [...prevFiles];
+            next[idx] = newFile;
+            return next;
+          } else {
+            return [...prevFiles, newFile];
+          }
+        });
+      });
+
+      eventSource.addEventListener("build-finished", (e: any) => {
+        const finishMsg = JSON.parse(e.data) as Message;
+        setMessages(prev => {
+          if (prev.some(m => m.id === finishMsg.id)) return prev;
+          return [...prev, finishMsg];
+        });
+        // Sync complete task tree
+        fetchInitialData();
+      });
+
+      eventSource.addEventListener("session-cleared", () => {
+        setMessages([]);
+        setTasks([]);
+        setFiles([]);
+        setCurrentPrompt("");
+      });
+
+      eventSource.addEventListener("plan-awaiting-approval", (e: any) => {
+        const data = JSON.parse(e.data);
+        if (data && Array.isArray(data.tasks)) {
+          setTasks(data.tasks);
         }
       });
-    });
 
-    eventSource.addEventListener("build-finished", (e: any) => {
-      const finishMsg = JSON.parse(e.data) as Message;
-      setMessages(prev => {
-        if (prev.some(m => m.id === finishMsg.id)) return prev;
-        return [...prev, finishMsg];
+      eventSource.addEventListener("plan-approved", () => {
+        fetchInitialData();
       });
-      // Sync complete task tree
-      fetchInitialData();
-    });
 
-    eventSource.addEventListener("session-cleared", () => {
-      setMessages([]);
-      setTasks([]);
-      setFiles([]);
-      setCurrentPrompt("");
-    });
+      eventSource.addEventListener("plan-rejected", () => {
+        fetchInitialData();
+      });
+    };
 
-    eventSource.addEventListener("plan-awaiting-approval", (e: any) => {
-      const data = JSON.parse(e.data);
-      if (data && Array.isArray(data.tasks)) {
-        setTasks(data.tasks);
-      }
-    });
-
-    eventSource.addEventListener("plan-approved", () => {
-      fetchInitialData();
-    });
-
-    eventSource.addEventListener("plan-rejected", () => {
-      fetchInitialData();
-    });
+    connect();
 
     return () => {
-      eventSource.close();
+      if (activeEventSource) {
+        activeEventSource.close();
+      }
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
+      }
     };
-  };
+  }, []);
 
   const handleSendPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -359,7 +373,7 @@ export default function App() {
       const res = await fetch("/api/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role: "user", content: userText }),
+        body: JSON.stringify({ role: "user", content: userText, useThinking: isThinkingMode, sessionId: activeSessionId }),
       });
 
       if (!res.ok) {
@@ -405,17 +419,22 @@ export default function App() {
   };
 
   const handleUpdateFile = async (path: string, content: string) => {
-    // Send a mock commit back to workspace database
     try {
-      const res = await fetch("/api/settings", {
+      const file = files.find(f => f.path === path);
+      const language = file ? file.language : "typescript";
+      const res = await fetch("/api/files/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // We can reuse the API settings router or direct endpoint to write file
+        body: JSON.stringify({ path, content, language }),
       });
-      // Update local cache
-      setFiles(files.map(f => f.path === path ? { ...f, content } : f));
+      if (res.ok) {
+        // Update local cache
+        setFiles(files.map(f => f.path === path ? { ...f, content } : f));
+      } else {
+        console.error("Save code file backend error:", await res.text());
+      }
     } catch (e) {
-      console.error("Save code file error:", e);
+      console.error("Save code file network/client error:", e);
     }
   };
 
@@ -634,7 +653,7 @@ export default function App() {
                       { id: "simulation", name: "Sub-Tasks Simulator", icon: Cpu, color: "text-pink-500 animate-pulse" },
                       { id: "code", name: "Code", icon: Code, color: "text-blue-500" },
                       { id: "deploy", name: "Deploy", icon: Zap, color: "text-amber-500" },
-                      { id: "logs", name: "Logs", icon: FileText, color: "text-gray-500" },
+                      { id: "logs", name: "Live Output 🖥️", icon: Terminal, color: "text-emerald-500 font-semibold" },
                       { id: "github", name: "GitHub", icon: Github, color: "text-neutral-800" },
                       { id: "permissions", name: "Permissions", icon: ShieldCheck, color: "text-emerald-500" },
                       { id: "settings", name: "Settings", icon: Settings, color: "text-gray-600" },
@@ -734,7 +753,7 @@ export default function App() {
                       </button>
 
                       <input
-                        id="input-prompt-command"
+                        id="input-prompt-command-welcome"
                         type="text"
                         placeholder="Command the Titan-Lobe..."
                         value={inputText}
@@ -743,8 +762,23 @@ export default function App() {
                         disabled={isSending}
                       />
 
+                      <button 
+                        id="btn-input-thinking-toggle-welcome"
+                        type="button"
+                        onClick={() => setIsThinkingMode(prev => !prev)}
+                        className={`p-2 rounded-full flex items-center gap-1.5 transition-all text-xs font-mono border cursor-pointer select-none ${
+                          isThinkingMode 
+                            ? "bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100" 
+                            : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100 hover:text-gray-600"
+                        }`}
+                        title={isThinkingMode ? "High Thinking Mode (gemini-3.1-pro-preview with HIGH thinking) Active" : "Click to enable High Thinking Mode"}
+                      >
+                        <Brain className={`h-4 w-4 ${isThinkingMode ? "animate-pulse text-purple-500" : ""}`} />
+                        <span className="hidden sm:inline">High Thinking</span>
+                      </button>
+
                       <button
-                        id="btn-input-submit"
+                        id="btn-input-submit-welcome"
                         type="submit"
                         disabled={!inputText.trim() || isSending}
                         className="p-3 bg-black text-white hover:bg-zinc-800 rounded-full transition-all disabled:opacity-30 disabled:hover:bg-black select-none shrink-0"
@@ -902,11 +936,131 @@ export default function App() {
                               <div className="h-9 w-9 rounded-full bg-zinc-900 flex items-center justify-center text-white shrink-0 shadow-sm">
                                 <Cpu className="h-5 w-5" />
                               </div>
-                              <div className="flex-1 space-y-1">
+                              <div className="flex-1 space-y-4">
                                 <div className="text-gray-800 leading-relaxed text-sm p-4 bg-white border border-gray-150 rounded-2xl">
                                   {msg.content}
                                 </div>
-                                <span className="text-[9px] font-mono text-gray-400">
+
+                                {/* Custom gorgeous AI Smart Summary Card */}
+                                {msg.smartSummary && (
+                                  <div className="bg-slate-900 text-slate-100 rounded-3xl border border-slate-800 p-5 sm:p-6 shadow-xl space-y-6 overflow-hidden max-w-2xl relative">
+                                    <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+                                    <div className="absolute bottom-0 left-0 w-36 h-36 bg-amber-500/5 rounded-full blur-2xl pointer-events-none" />
+
+                                    {/* Header Badge */}
+                                    <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                                      <div className="flex items-center gap-2">
+                                        <div className="bg-indigo-500/20 text-indigo-400 p-1.5 rounded-lg border border-indigo-500/30">
+                                          <Cpu className="h-4 w-4 animate-pulse" />
+                                        </div>
+                                        <div>
+                                          <div className="text-[9px] font-mono font-bold tracking-widest text-indigo-400 uppercase">AI Smart Summary</div>
+                                          <h4 className="text-sm font-bold text-slate-100 font-mono tracking-tight">{msg.smartSummary.title}</h4>
+                                        </div>
+                                      </div>
+                                      <span className="text-[9px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-900/60 px-2.5 py-0.5 rounded-md uppercase font-bold shrink-0">
+                                        Active Build
+                                      </span>
+                                    </div>
+
+                                    {/* Two Column Grid */}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      {/* Visual Vibe */}
+                                      <div className="space-y-1.5">
+                                        <div className="flex items-center gap-1.5 text-xs font-mono text-indigo-300 font-bold uppercase tracking-wider">
+                                          <span>🎨</span> Visual Vibe & Theme
+                                        </div>
+                                        <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                          {msg.smartSummary.visualVibe}
+                                        </p>
+                                      </div>
+
+                                      {/* Architecture Overview */}
+                                      <div className="space-y-1.5">
+                                        <div className="flex items-center gap-1.5 text-xs font-mono text-indigo-300 font-bold uppercase tracking-wider">
+                                          <span>🏗️</span> Architecture Overview
+                                        </div>
+                                        <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                          {msg.smartSummary.architectureOverview}
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Generated Modules Checklist */}
+                                    {msg.smartSummary.generatedModules && msg.smartSummary.generatedModules.length > 0 && (
+                                      <div className="space-y-3 pt-2">
+                                        <div className="text-xs font-mono text-slate-400 font-bold uppercase tracking-wider">
+                                          🛠️ Synthesized Modules ({msg.smartSummary.generatedModules.length})
+                                        </div>
+                                        <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-thin pr-1">
+                                          {msg.smartSummary.generatedModules.map((mod: any, mIdx: number) => (
+                                            <div 
+                                              key={mIdx} 
+                                              onClick={() => {
+                                                setFocusedFilePath(mod.path);
+                                                setActiveTab("code");
+                                              }}
+                                              className="group flex items-start justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/40 transition-all cursor-pointer text-left"
+                                            >
+                                              <div className="flex-1 min-w-0 pr-3">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                  <span className="text-[10px] font-mono font-bold text-indigo-400 bg-indigo-950 px-2 py-0.5 rounded-md border border-indigo-900/50 truncate">
+                                                    {mod.role}
+                                                  </span>
+                                                  <span className="text-[10px] font-mono text-slate-500 font-medium truncate">
+                                                    {mod.path.replace("src/generated/", "")}
+                                                  </span>
+                                                </div>
+                                                <p className="text-[11px] text-slate-400 line-clamp-2">
+                                                  {mod.description}
+                                                </p>
+                                              </div>
+                                              <div className="h-6 w-6 rounded-lg bg-slate-900 flex items-center justify-center border border-slate-800 group-hover:bg-indigo-950 group-hover:border-indigo-800 transition-colors shrink-0">
+                                                <Code className="h-3 w-3 text-slate-400 group-hover:text-indigo-400" />
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Database & Storage */}
+                                    {msg.smartSummary.databaseAndState && (
+                                      <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-4 flex gap-3 items-start">
+                                        <Database className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+                                        <div className="space-y-1">
+                                          <div className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider">
+                                            📦 Relational Schema & State Layer
+                                          </div>
+                                          <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                            {msg.smartSummary.databaseAndState}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Next Actions */}
+                                    {msg.smartSummary.nextSteps && msg.smartSummary.nextSteps.length > 0 && (
+                                      <div className="border-t border-slate-800 pt-4 space-y-2.5">
+                                        <div className="text-xs font-mono text-indigo-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                          <span>💡</span> Recommended Next Steps
+                                        </div>
+                                        <div className="grid grid-cols-1 gap-2">
+                                          {msg.smartSummary.nextSteps.map((step: string, sIdx: number) => (
+                                            <div key={sIdx} className="flex items-start gap-2.5 text-xs text-slate-300 bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60 font-sans">
+                                              <span className="flex h-5 w-5 rounded-full bg-slate-900 border border-slate-800 items-center justify-center text-[10px] font-mono text-indigo-400 font-bold shrink-0">
+                                                {sIdx + 1}
+                                              </span>
+                                              <span className="leading-relaxed">{step}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                <span className="text-[9px] font-mono text-gray-400 block">
                                   Agent • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                 </span>
                               </div>
@@ -1027,6 +1181,20 @@ export default function App() {
                         className="flex-1 bg-transparent border-none text-sm text-gray-800 focus:outline-none placeholder-gray-400"
                         disabled={isSending}
                       />
+                      <button 
+                        id="btn-input-thinking-toggle-chat"
+                        type="button"
+                        onClick={() => setIsThinkingMode(prev => !prev)}
+                        className={`p-2 rounded-full flex items-center gap-1.5 transition-all text-xs font-mono border cursor-pointer select-none ${
+                          isThinkingMode 
+                            ? "bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100" 
+                            : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100 hover:text-gray-600"
+                        }`}
+                        title={isThinkingMode ? "High Thinking Mode (gemini-3.1-pro-preview with HIGH thinking) Active" : "Click to enable High Thinking Mode"}
+                      >
+                        <Brain className={`h-4 w-4 ${isThinkingMode ? "animate-pulse text-purple-500" : ""}`} />
+                        <span className="hidden sm:inline">High Thinking</span>
+                      </button>
                       <button
                         id="btn-input-submit"
                         type="submit"
@@ -1077,7 +1245,7 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="flex-1 flex flex-col min-h-0"
             >
-              <CodeView files={files} onUpdateFile={handleUpdateFile} />
+              <CodeView files={files} onUpdateFile={handleUpdateFile} initialSelectedPath={focusedFilePath} onRefreshFiles={fetchInitialData} />
             </motion.div>
           )}
 
@@ -1098,24 +1266,12 @@ export default function App() {
           {activeTab === "logs" && (
             <motion.div
               key="logs-panel"
-              className="flex-1 flex flex-col min-h-0 border border-gray-100 rounded-3xl bg-gray-950 p-5 font-mono text-xs text-gray-300"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              className="flex-1 flex flex-col min-h-0"
             >
-              <div className="flex items-center justify-between border-b border-gray-800 pb-3 mb-4 text-gray-500">
-                <span>TERMINAL SERVICE CONSOLE</span>
-                <span className="text-emerald-500">LIVESTREAM</span>
-              </div>
-              <div className="space-y-1.5 flex-1 overflow-y-auto">
-                <div>[SYSTEM] Container spin-up active. Port 3000 mapped.</div>
-                <div>[SYSTEM] PostgreSQL relational status: {dbStatus.postgres}</div>
-                <div>[SYSTEM] Redis caching pool status: {dbStatus.redis}</div>
-                <div>[HTTP] Listening for SSE handshakes at /api/tasks/stream</div>
-                {files.map(f => (
-                  <div key={f.path} className="text-emerald-400">[FILESYSTEM] Synced synthesized artifact: {f.path}</div>
-                ))}
-                {tasks.map(t => (
-                  <div key={t.id} className="text-amber-500">[COMPILER] Active pipeline registration: "{t.name}"</div>
-                ))}
-              </div>
+              <TerminalLogsView tasks={tasks} files={files} dbStatus={dbStatus} />
             </motion.div>
           )}
 
@@ -1141,7 +1297,7 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="flex-1 flex flex-col min-h-0"
             >
-              <GithubView />
+              <GithubView sessionId={activeSessionId} />
             </motion.div>
           )}
 

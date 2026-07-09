@@ -1,9 +1,23 @@
+export interface SmartSummary {
+  title: string;
+  visualVibe: string;
+  architectureOverview: string;
+  generatedModules: {
+    path: string;
+    role: string;
+    description: string;
+  }[];
+  databaseAndState: string;
+  nextSteps: string[];
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
   taskId?: string; // If this message spawned a task
+  smartSummary?: SmartSummary;
 }
 
 export interface Task {

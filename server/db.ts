@@ -111,6 +111,11 @@ export async function initDb(): Promise<DatabaseStatus> {
     `);
 
     await pgClient.query(`
+      ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS smart_summary TEXT;
+    `);
+
+    await pgClient.query(`
       CREATE TABLE IF NOT EXISTS subtasks (
         id VARCHAR(255) PRIMARY KEY,
         task_id VARCHAR(255) NOT NULL,
@@ -161,7 +166,8 @@ export async function getMessages(): Promise<Message[]> {
       role: row.role as any,
       content: row.content,
       timestamp: row.timestamp,
-      taskId: row.task_id || undefined
+      taskId: row.task_id || undefined,
+      smartSummary: row.smart_summary ? JSON.parse(row.smart_summary) : undefined
     }));
   } catch (err) {
     console.error("Failed to query messages from Postgres:", err);
@@ -179,8 +185,15 @@ export async function addMessage(msg: Message): Promise<void> {
 
   try {
     await pgClient!.query(
-      "INSERT INTO messages (id, role, content, timestamp, task_id) VALUES ($1, $2, $3, $4, $5)",
-      [msg.id, msg.role, msg.content, msg.timestamp, msg.taskId || null]
+      "INSERT INTO messages (id, role, content, timestamp, task_id, smart_summary) VALUES ($1, $2, $3, $4, $5, $6)",
+      [
+        msg.id,
+        msg.role,
+        msg.content,
+        msg.timestamp,
+        msg.taskId || null,
+        msg.smartSummary ? JSON.stringify(msg.smartSummary) : null
+      ]
     );
   } catch (err) {
     console.error("Failed to insert message to Postgres:", err);
@@ -396,5 +409,101 @@ export async function clearFiles(): Promise<void> {
     await pgClient!.query("DELETE FROM files");
   } catch (err) {
     console.error("Failed to clear files from Postgres:", err);
+  }
+}
+
+export async function deleteFileOrFolder(targetPath: string, isDirectory: boolean): Promise<void> {
+  if (useLocalJson) {
+    loadLocalDb();
+    if (isDirectory) {
+      const prefix = targetPath.endsWith("/") ? targetPath : `${targetPath}/`;
+      localDb.files = localDb.files.filter(f => !f.path.startsWith(prefix));
+    } else {
+      localDb.files = localDb.files.filter(f => f.path !== targetPath);
+    }
+    saveLocalDb();
+    return;
+  }
+
+  try {
+    if (isDirectory) {
+      const prefix = targetPath.endsWith("/") ? targetPath : `${targetPath}/`;
+      await pgClient!.query("DELETE FROM files WHERE path LIKE $1", [`${prefix}%`]);
+    } else {
+      await pgClient!.query("DELETE FROM files WHERE path = $1", [targetPath]);
+    }
+  } catch (err) {
+    console.error("Failed to delete file/folder in Postgres:", err);
+  }
+}
+
+export async function renameFileOrFolder(oldPath: string, newPath: string, isDirectory: boolean): Promise<void> {
+  if (useLocalJson) {
+    loadLocalDb();
+    if (isDirectory) {
+      const oldPrefix = oldPath.endsWith("/") ? oldPath : `${oldPath}/`;
+      const newPrefix = newPath.endsWith("/") ? newPath : `${newPath}/`;
+      localDb.files = localDb.files.map(f => {
+        if (f.path.startsWith(oldPrefix)) {
+          return {
+            ...f,
+            path: f.path.replace(oldPrefix, newPrefix),
+          };
+        }
+        return f;
+      });
+    } else {
+      localDb.files = localDb.files.map(f => {
+        if (f.path === oldPath) {
+          const ext = newPath.split(".").pop() || "";
+          let language = f.language;
+          if (["ts", "tsx"].includes(ext)) language = "typescript";
+          else if (["js", "jsx"].includes(ext)) language = "javascript";
+          else if (ext === "json") language = "json";
+          else if (ext === "css") language = "css";
+          else if (ext === "html") language = "html";
+          else if (ext === "md") language = "markdown";
+          return {
+            ...f,
+            path: newPath,
+            language
+          };
+        }
+        return f;
+      });
+    }
+    saveLocalDb();
+    return;
+  }
+
+  try {
+    if (isDirectory) {
+      const oldPrefix = oldPath.endsWith("/") ? oldPath : `${oldPath}/`;
+      const newPrefix = newPath.endsWith("/") ? newPath : `${newPath}/`;
+      const res = await pgClient!.query("SELECT * FROM files WHERE path LIKE $1", [`${oldPrefix}%`]);
+      for (const row of res.rows) {
+        const updatedPath = row.path.replace(oldPrefix, newPrefix);
+        await pgClient!.query("DELETE FROM files WHERE path = $1", [row.path]);
+        await pgClient!.query("INSERT INTO files (path, content, language) VALUES ($1, $2, $3)", [updatedPath, row.content, row.language]);
+      }
+    } else {
+      const ext = newPath.split(".").pop() || "";
+      let language = "typescript";
+      if (["ts", "tsx"].includes(ext)) language = "typescript";
+      else if (["js", "jsx"].includes(ext)) language = "javascript";
+      else if (ext === "json") language = "json";
+      else if (ext === "css") language = "css";
+      else if (ext === "html") language = "html";
+      else if (ext === "md") language = "markdown";
+
+      const res = await pgClient!.query("SELECT content FROM files WHERE path = $1", [oldPath]);
+      if (res.rows.length > 0) {
+        const content = res.rows[0].content;
+        await pgClient!.query("DELETE FROM files WHERE path = $1", [oldPath]);
+        await pgClient!.query("INSERT INTO files (path, content, language) VALUES ($1, $2, $3)", [newPath, content, language]);
+      }
+    }
+  } catch (err) {
+    console.error("Failed to rename file/folder in Postgres:", err);
   }
 }

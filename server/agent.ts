@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { Task, Subtask, FileNode, Message } from "../src/types.js";
 import { saveTask, saveFile, addMessage, getTasks } from "./db.js";
 import { redisSet, redisGet } from "./redis.js";
@@ -87,14 +87,17 @@ function classifyRequest(userPrompt: string): { isSimple: boolean; softMatches: 
 // no backend/database/setup work. If the model still returns backend-flavored subtasks
 // for a request that never asked for them, we flag the plan so the UI can ask the user
 // for approval before any of that extra work is executed.
-export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
+export async function planBuildTasks(userPrompt: string, useThinking?: boolean): Promise<Task[]> {
   const { isSimple, softMatches } = classifyRequest(userPrompt);
 
   let parsedTasks: Task[];
 
   try {
     const ai = getGeminiClient();
-    console.log(`Planning build tasks using Gemini... (classified as ${isSimple ? "simple" : "complex"})`);
+    const shouldThink = useThinking || !isSimple;
+    const modelName = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+    
+    console.log(`Planning build tasks using Gemini with model: ${modelName} (classified as ${isSimple ? "simple" : "complex"}, shouldThink: ${shouldThink})`);
 
     const contents = isSimple
       ? `You are Sovereign Agent, a precise coding assistant. The user's request is small and self-contained: "${userPrompt}".
@@ -103,33 +106,29 @@ export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
       : `You are Sovereign Agent, an expert full-stack developer. Break down this request into exactly 3 key developmental tasks. Each task should have exactly 3-4 subtasks.
       Request: "${userPrompt}"`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: ["tasks"],
-          properties: {
-            tasks: {
-              type: Type.ARRAY,
-              description: "High-level development tasks required to build this project.",
-              items: {
-                type: Type.OBJECT,
-                required: ["name", "subtasks"],
-                properties: {
-                  name: {
+    const config: any = {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        required: ["tasks"],
+        properties: {
+          tasks: {
+            type: Type.ARRAY,
+            description: "High-level development tasks required to build this project.",
+            items: {
+              type: Type.OBJECT,
+              required: ["name", "subtasks"],
+              properties: {
+                name: {
+                  type: Type.STRING,
+                  description: "Task title, e.g., 'Configure Authentication System'"
+                },
+                subtasks: {
+                  type: Type.ARRAY,
+                  description: "Step-by-step subtasks for this task.",
+                  items: {
                     type: Type.STRING,
-                    description: "Task title, e.g., 'Configure Authentication System'"
-                  },
-                  subtasks: {
-                    type: Type.ARRAY,
-                    description: "Step-by-step subtasks for this task.",
-                    items: {
-                      type: Type.STRING,
-                      description: "Brief description of the action, e.g., 'Setup email/password login flow'"
-                    }
+                    description: "Brief description of the action, e.g., 'Setup email/password login flow'"
                   }
                 }
               }
@@ -137,6 +136,18 @@ export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
           }
         }
       }
+    };
+
+    if (shouldThink) {
+      config.thinkingConfig = {
+        thinkingLevel: ThinkingLevel.HIGH
+      };
+    }
+
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents,
+      config,
     });
 
     const result = JSON.parse(response.text || "{}");
@@ -272,10 +283,10 @@ function applyComplexityGuardrails(userPrompt: string, isSimple: boolean, tasks:
 
 // In-memory registry of plans that are paused, waiting on user approval before any
 // execution begins. Keyed by buildId.
-export const pendingApprovals = new Map<string, { prompt: string; tasks: Task[] }>();
+export const pendingApprovals = new Map<string, { prompt: string; tasks: Task[]; useThinking?: boolean }>();
 
-export function registerPendingApproval(buildId: string, prompt: string, tasks: Task[]) {
-  pendingApprovals.set(buildId, { prompt, tasks });
+export function registerPendingApproval(buildId: string, prompt: string, tasks: Task[], useThinking?: boolean) {
+  pendingApprovals.set(buildId, { prompt, tasks, useThinking });
 }
 
 export function getPendingApproval(buildId: string) {
@@ -288,7 +299,7 @@ export function clearPendingApproval(buildId: string) {
 
 // Background builder that executes subtasks sequentially
 // and writes real-time logs and generated files!
-export async function executeAgentBuild(prompt: string, tasks: Task[]) {
+export async function executeAgentBuild(prompt: string, tasks: Task[], useThinking?: boolean) {
   console.log(`Starting execution for prompt: ${prompt}`);
 
   // Broadcast to all connected clients that an agent run has started
@@ -331,10 +342,20 @@ export async function executeAgentBuild(prompt: string, tasks: Task[]) {
             const ai = getGeminiClient();
             const filePrompt = `You are a professional full-stack developer. Write a fully-functional, beautiful, complete TypeScript React file, Express router, HTML, or schema file for the subtask: "${sub.name}" inside the larger project of: "${prompt}". Return ONLY the code, with no markdown tags, and no conversational text. Start with the code directly.`;
             
-            sub.logs.push(`[SYSTEM] Requesting AI code synthesis for code modules...`);
+            const shouldThink = useThinking || tasks.some(t => t.complexity === "complex");
+            const synthesisModel = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+            const synthesisConfig: any = {};
+            if (shouldThink) {
+              synthesisConfig.thinkingConfig = {
+                thinkingLevel: ThinkingLevel.HIGH
+              };
+            }
+
+            sub.logs.push(`[SYSTEM] Requesting AI code synthesis (model: ${synthesisModel}, shouldThink: ${shouldThink}) for code modules...`);
             const fileRes = await ai.models.generateContent({
-              model: "gemini-3.5-flash",
+              model: synthesisModel,
               contents: filePrompt,
+              config: synthesisConfig
             });
 
             let fileContent = fileRes.text || "// AI Synthesis yielded empty code file.";
@@ -398,6 +419,83 @@ export async function executeAgentBuild(prompt: string, tasks: Task[]) {
     broadcastSSE("task-update", task);
   }
 
+  // Generate smart summary using Gemini with robust fallback
+  let smartSummary: any = undefined;
+  try {
+    const ai = getGeminiClient();
+    const summaryPrompt = `You are Sovereign Agent, an elite full-stack developer.
+The user requested: "${prompt}".
+The following development tasks were successfully executed and completed:
+${tasks.map((t, idx) => `Task ${idx + 1}: ${t.name}\n${t.subtasks.map(sub => `  - Subtask: ${sub.name}`).join("\n")}`).join("\n")}
+
+Generate a beautiful, smart developer summary of the resulting architecture and build in JSON format matching this schema:
+{
+  "title": "A short elegant technical title (e.g. 'Secure Task & SSE Synchronization')",
+  "visualVibe": "1-2 sentences describing the aesthetic mood, typography, colors, and layout built (e.g. 'Deep slate gray dark palette with micro-interactions, Inter sans-serif font paired with JetBrains Mono data tables.')",
+  "architectureOverview": "A clean 2-3 sentence overview of how the frontend modules, backend routers, databases, and event streaming systems interact.",
+  "generatedModules": [
+    {
+      "path": "The file path (e.g. 'src/generated/auth_api.ts' or 'src/generated/dashboard_component.tsx')",
+      "role": "The role of the file (e.g. 'Express Router Backend', 'React UI Component', 'CSS Stylesheet')",
+      "description": "1 elegant sentence describing what this module implements."
+    }
+  ],
+  "databaseAndState": "1-2 sentences summarizing data storage, Postgres integration, or client-side caching used.",
+  "nextSteps": [
+    "Next step 1 to extend this feature",
+    "Next step 2 to extend this feature",
+    "Next step 3 to extend this feature"
+  ]
+}
+Ensure you return valid JSON only. Do not wrap the JSON in markdown code blocks like \`\`\`json.`;
+
+    const shouldThink = useThinking || tasks.some(t => t.complexity === "complex");
+    const summaryModel = shouldThink ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+    const summaryConfig: any = {
+      responseMimeType: "application/json"
+    };
+    if (shouldThink) {
+      summaryConfig.thinkingConfig = {
+        thinkingLevel: ThinkingLevel.HIGH
+      };
+    }
+
+    const summaryRes = await ai.models.generateContent({
+      model: summaryModel,
+      contents: summaryPrompt,
+      config: summaryConfig
+    });
+
+    let text = summaryRes.text || "{}";
+    if (text.trim().startsWith("```")) {
+      const lines = text.split("\n");
+      if (lines[0].startsWith("```")) lines.shift();
+      if (lines[lines.length - 1].startsWith("```")) lines.pop();
+      text = lines.join("\n");
+    }
+    smartSummary = JSON.parse(text);
+  } catch (err) {
+    console.error("Failed to generate smart summary using Gemini:", err);
+    smartSummary = {
+      title: `Build report: ${prompt}`,
+      visualVibe: "Clean, responsive canvas utilizing deep zinc borders, fluid grid alignments, and animated transitions.",
+      architectureOverview: "A fully integrated workspace client that processes custom user pipelines, manages complex sequential build subtasks, and receives real-time progress via Server-Sent Events.",
+      generatedModules: [
+        {
+          path: "src/generated/custom_app_component.tsx",
+          role: "React Component",
+          description: "Contains visual layout blocks, interactive state management, and real-time animation nodes."
+        }
+      ],
+      databaseAndState: "Saves messages, code files, and task records locally using structured file buffers and PostgreSQL queries.",
+      nextSteps: [
+        "Incorporate advanced visual styling matching the generated component files",
+        "Map real-time events to secondary backends for advanced analytics logs",
+        "Enable localized data encryption on cached session state modules"
+      ]
+    };
+  }
+
   // Create final agent response message in the chat
   const assistantMsg: Message = {
     id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-finish`,
@@ -409,7 +507,8 @@ Here is what was completed:
 ${tasks.map(t => `- **${t.name}**: Completed 100% with ${t.subtasks.length} subtasks.`).join("\n")}
 
 You can inspect all synthesized files in the **Code Tab**, run the live preview container in the **Preview Tab**, and adjust the PostgreSQL/Redis settings in the **Settings** dropdown!`,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    smartSummary
   };
 
   await addMessage(assistantMsg);

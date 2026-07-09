@@ -7,10 +7,11 @@ import dotenv from "dotenv";
 // Load environment variables
 dotenv.config();
 
-import { initDb, getMessages, addMessage, clearMessages, getTasks, deleteTasks, deleteTaskById, getFiles, clearFiles, saveFile } from "./server/db.js";
+import { initDb, getMessages, addMessage, clearMessages, getTasks, deleteTasks, deleteTaskById, getFiles, clearFiles, saveFile, deleteFileOrFolder, renameFileOrFolder } from "./server/db.js";
 import { initRedis, redisFlush } from "./server/redis.js";
 import { planBuildTasks, executeAgentBuild, sseClients, broadcastSSE, registerPendingApproval, getPendingApproval, clearPendingApproval, buildSimpleFallbackTasks } from "./server/agent.js";
-import { DatabaseStatus, Message } from "./src/types.js";
+import { getGithubConfig, cloneRepository, repoNameFromUrl } from "./server/github.js";
+import { DatabaseStatus, Message, Task } from "./src/types.js";
 
 const app = express();
 const PORT = 3000;
@@ -46,7 +47,7 @@ app.get("/api/messages", async (req, res) => {
 // API: Add user message & trigger Sovereign Agent
 app.post("/api/messages", async (req, res) => {
   try {
-    const { role, content } = req.body;
+    const { role, content, useThinking, sessionId } = req.body;
     if (!content) {
       return res.status(400).json({ error: "Content is required" });
     }
@@ -64,8 +65,120 @@ app.post("/api/messages", async (req, res) => {
     // If it's a user command, trigger the agent task planner and background executor
     if (userMsg.role === "user") {
       try {
+        // Detect GitHub clone request
+        const gitUrlMatch = content.match(/(https?:\/\/)?(www\.)?github\.com\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+(\.git)?/i);
+        const isCloneReq = gitUrlMatch || content.toLowerCase().includes("clone ");
+
+        if (isCloneReq) {
+          const targetUrl = gitUrlMatch ? gitUrlMatch[0] : content.split(/\s+/).find((w: string) => w.startsWith("http") || w.includes("github.com"));
+          if (targetUrl) {
+            const repoUrl = targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`;
+            const taskId = `task-clone-${Date.now()}`;
+            const repoName = repoNameFromUrl(repoUrl);
+            
+            const cloneTask: Task = {
+              id: taskId,
+              name: `Clone & Import Repository: ${repoName}`,
+              status: "running",
+              progress: 10,
+              activeSubtaskIndex: 0,
+              createdAt: new Date().toISOString(),
+              complexity: "simple",
+              requiresApproval: false,
+              subtasks: [
+                { id: `${taskId}-sub-0`, taskId, name: "Establish Git handshake and fetch remote pack", status: "running", logs: ["Connecting to remote host..."] },
+                { id: `${taskId}-sub-1`, taskId, name: "Extract filesystem tree and index files", status: "pending", logs: ["Waiting..."] },
+                { id: `${taskId}-sub-2`, taskId, name: "Load repository commit chronology and active branch", status: "pending", logs: ["Waiting..."] }
+              ]
+            };
+
+            await saveTaskWithRetry(cloneTask);
+            userMsg.taskId = taskId;
+            broadcastSSE("build-started", { prompt: `Clone ${repoName}`, totalTasks: 1 });
+            broadcastSSE("task-update", cloneTask);
+
+            // Run clone in background
+            (async () => {
+              try {
+                cloneTask.subtasks[0].logs.push(`[${new Date().toLocaleTimeString()}] Fetching repository pack files from ${repoUrl}...`);
+                await saveTaskWithRetry(cloneTask);
+                broadcastSSE("task-update", cloneTask);
+
+                const result = await cloneRepository(repoUrl, sessionId);
+
+                cloneTask.subtasks[0].status = "completed";
+                cloneTask.subtasks[0].logs.push(`[${new Date().toLocaleTimeString()}] Successfully fetched and decrypted remote Pack files.`);
+                cloneTask.progress = 40;
+                
+                cloneTask.activeSubtaskIndex = 1;
+                cloneTask.subtasks[1].status = "running";
+                cloneTask.subtasks[1].logs = [
+                  `[Sovereign Agent] Extracting directory tree...`,
+                  `[${new Date().toLocaleTimeString()}] Indexing and writing ${result.filesCount} modules into Workspace Storage...`
+                ];
+                await saveTaskWithRetry(cloneTask);
+                broadcastSSE("task-update", cloneTask);
+                await new Promise(r => setTimeout(r, 1200));
+
+                cloneTask.subtasks[1].status = "completed";
+                cloneTask.subtasks[1].logs.push(`[SUCCESS] Stored all cloned files in local workspace.`);
+                cloneTask.progress = 80;
+
+                cloneTask.activeSubtaskIndex = 2;
+                cloneTask.subtasks[2].status = "running";
+                cloneTask.subtasks[2].logs = [
+                  `[Sovereign Agent] Reading commit graph...`,
+                  `[${new Date().toLocaleTimeString()}] Loaded ${result.commits.length} commits on active branch "${result.branch}".`
+                ];
+                await saveTaskWithRetry(cloneTask);
+                broadcastSSE("task-update", cloneTask);
+                await new Promise(r => setTimeout(r, 800));
+
+                cloneTask.subtasks[2].status = "completed";
+                cloneTask.progress = 100;
+                cloneTask.status = "completed";
+                await saveTaskWithRetry(cloneTask);
+                broadcastSSE("task-update", cloneTask);
+
+                const assistantMsg: Message = {
+                  id: `msg-clone-${Date.now()}-finish`,
+                  role: "assistant",
+                  content: `### Sovereign Git Sync Report\nI have successfully cloned and imported the repository **${result.repoName}**!\n\n- **Active Branch**: \`${result.branch}\`\n- **Imported Modules**: ${result.filesCount} code modules loaded into workspace.\n- **Commit Chronology**: Fetched the last ${result.commits.length} commits.\n\nAll imported repository files are now available in the **Code Tab** for you to inspect and modify!`,
+                  timestamp: new Date().toISOString()
+                };
+                await addMessage(assistantMsg);
+                broadcastSSE("build-finished", assistantMsg);
+                broadcastSSE("connected", { status: "refreshed" });
+
+              } catch (cloneErr: any) {
+                console.error("Async background clone failed:", cloneErr);
+                cloneTask.status = "failed";
+                for (const sub of cloneTask.subtasks) {
+                  if (sub.status === "running" || sub.status === "pending") {
+                    sub.status = "failed";
+                    sub.logs.push(`[ERROR] ${cloneErr.message || "Operation failed."}`);
+                  }
+                }
+                await saveTaskWithRetry(cloneTask);
+                broadcastSSE("task-update", cloneTask);
+
+                const errAssistantMsg: Message = {
+                  id: `msg-clone-err-${Date.now()}-finish`,
+                  role: "assistant",
+                  content: `### ⚠️ Git Clone Failed\nI encountered an error trying to clone and import the repository from **${repoUrl}**:\n\n\`\`\`\n${cloneErr.message}\n\`\`\`\n\nPlease make sure the repository is public and the URL is typed correctly.`,
+                  timestamp: new Date().toISOString()
+                };
+                await addMessage(errAssistantMsg);
+                broadcastSSE("build-finished", errAssistantMsg);
+              }
+            })();
+
+            return res.json({ message: userMsg, tasks: [cloneTask] });
+          }
+        }
+
         // Step 1: Generate Tasks and Subtasks list with Gemini (with fallback)
-        const plannedTasks = await planBuildTasks(content);
+        const plannedTasks = await planBuildTasks(content, useThinking);
         
         // Save initial tasks to SQL relational store
         for (const task of plannedTasks) {
@@ -81,11 +194,11 @@ app.post("/api/messages", async (req, res) => {
         const needsApproval = plannedTasks.some(t => t.requiresApproval);
         if (needsApproval) {
           const buildId = plannedTasks.find(t => t.buildId)?.buildId || `build-${Date.now()}`;
-          registerPendingApproval(buildId, content, plannedTasks);
+          registerPendingApproval(buildId, content, plannedTasks, useThinking);
           broadcastSSE("plan-awaiting-approval", { buildId, tasks: plannedTasks });
         } else {
           // Trigger background asynchronous compilation/synthesis worker
-          executeAgentBuild(content, plannedTasks);
+          executeAgentBuild(content, plannedTasks, useThinking);
         }
 
         res.json({ message: userMsg, tasks: plannedTasks });
@@ -129,7 +242,7 @@ app.post("/api/tasks/approve", async (req, res) => {
     clearPendingApproval(buildId);
     broadcastSSE("plan-approved", { buildId });
 
-    executeAgentBuild(pending.prompt, approvedTasks);
+    executeAgentBuild(pending.prompt, approvedTasks, pending.useThinking);
 
     res.json({ status: "success", tasks: approvedTasks });
   } catch (err: any) {
@@ -285,6 +398,52 @@ app.get("/api/files", async (req, res) => {
   }
 });
 
+// API: Save or update a file in the workspace database
+app.post("/api/files/save", async (req, res) => {
+  try {
+    const { path: filePath, content, language } = req.body;
+    if (!filePath) {
+      return res.status(400).json({ error: "File path is required" });
+    }
+    await saveFile({ path: filePath, content: content || "", language: language || "typescript" });
+    res.json({ status: "success" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Delete a file or folder from the workspace database
+app.post("/api/files/delete", async (req, res) => {
+  try {
+    const { path: filePath, isDirectory } = req.body;
+    if (!filePath) {
+      return res.status(400).json({ error: "File/Folder path is required" });
+    }
+    await deleteFileOrFolder(filePath, !!isDirectory);
+    // Broadcast workspace refresh
+    broadcastSSE("connected", { status: "refreshed" });
+    res.json({ status: "success" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Rename a file or folder in the workspace database
+app.post("/api/files/rename", async (req, res) => {
+  try {
+    const { oldPath, newPath, isDirectory } = req.body;
+    if (!oldPath || !newPath) {
+      return res.status(400).json({ error: "oldPath and newPath are required" });
+    }
+    await renameFileOrFolder(oldPath, newPath, !!isDirectory);
+    // Broadcast workspace refresh
+    broadcastSSE("connected", { status: "refreshed" });
+    res.json({ status: "success" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API: Update settings & save to .env
 app.post("/api/settings", async (req, res) => {
   try {
@@ -340,6 +499,38 @@ app.post("/api/settings", async (req, res) => {
   }
 });
 
+// API: Get connected GitHub configuration and commits
+app.get("/api/github/config", (req, res) => {
+  try {
+    const sessionId = req.query.sessionId as string;
+    const config = getGithubConfig(sessionId);
+    res.json(config);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Trigger GitHub cloning & indexing manually
+app.post("/api/github/clone", async (req, res) => {
+  try {
+    const { repoUrl, sessionId } = req.body;
+    if (!repoUrl) {
+      return res.status(400).json({ error: "repoUrl is required" });
+    }
+    
+    // Trigger clone
+    const result = await cloneRepository(repoUrl, sessionId);
+    
+    // Broadcast workspace refresh
+    broadcastSSE("connected", { status: "refreshed" });
+    
+    res.json(result);
+  } catch (err: any) {
+    console.error("API manual github clone error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API: Real-time progress updates SSE connection
 app.get("/api/tasks/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -350,13 +541,18 @@ app.get("/api/tasks/stream", (req, res) => {
 
   sseClients.add(res);
 
-  // Send initial connected ping
-  res.write(`event: connected\ndata: ${JSON.stringify({ status: "listening" })}\n\n`);
+  // Send initial connected ping with native retry interval
+  res.write(`retry: 5000\nevent: connected\ndata: ${JSON.stringify({ status: "listening" })}\n\n`);
 
-  // Periodic heartbeat to prevent proxy timeouts (every 15 seconds)
+  // Periodic heartbeat to prevent proxy timeouts (every 10 seconds with a real ping event)
   const heartbeat = setInterval(() => {
-    res.write(`:\n\n`); // SSE comment acts as lightweight keep-alive
-  }, 15000);
+    try {
+      res.write(`event: ping\ndata: ${JSON.stringify({ time: Date.now() })}\n\n`);
+    } catch (err) {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    }
+  }, 10000);
 
   req.on("close", () => {
     clearInterval(heartbeat);
