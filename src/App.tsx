@@ -24,7 +24,8 @@ import {
   Clock,
   Loader2,
   Brain,
-  Terminal
+  Terminal,
+  Sparkles
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Message, Task, FileNode, DatabaseStatus } from "./types.js";
@@ -42,11 +43,12 @@ import ScreenshotsView from "./components/ScreenshotsView.tsx";
 import SettingsView from "./components/SettingsView.tsx";
 import SubtasksSimulationView from "./components/SubtasksSimulationView.tsx";
 import TerminalLogsView from "./components/TerminalLogsView.tsx";
+import FaceSwapView from "./components/FaceSwapView.tsx";
 
 export default function App() {
   // Navigation State
   const [activeTab, setActiveTab] = useState<
-    "chat" | "preview" | "code" | "database" | "logs" | "deploy" | "github" | "permissions" | "settings" | "supabase" | "notifications" | "screenshots" | "simulation"
+    "chat" | "preview" | "code" | "database" | "logs" | "deploy" | "github" | "permissions" | "settings" | "supabase" | "notifications" | "screenshots" | "simulation" | "faceswap"
   >("chat");
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -673,6 +675,7 @@ export default function App() {
                     className="absolute right-0 mt-2 w-56 bg-white border border-gray-100 rounded-2xl shadow-xl p-2 z-50 overflow-hidden font-sans text-xs"
                   >
                     {[
+                      { id: "faceswap", name: "FaceSwap Chat ✨", icon: Sparkles, color: "text-indigo-600 font-semibold" },
                       { id: "simulation", name: "Sub-Tasks Simulator", icon: Cpu, color: "text-pink-500 animate-pulse" },
                       { id: "code", name: "Code", icon: Code, color: "text-blue-500" },
                       { id: "deploy", name: "Deploy", icon: Zap, color: "text-amber-500" },
@@ -1476,6 +1479,19 @@ export default function App() {
             </motion.div>
           )}
 
+          {/* 13. AI FACESWAP CONSOLE AND PICTURE EDITOR */}
+          {activeTab === "faceswap" && (
+            <motion.div
+              key="faceswap-panel"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              className="flex-1 flex flex-col min-h-0"
+            >
+              <FaceSwapView />
+            </motion.div>
+          )}
+
         </AnimatePresence>
       </main>
 
@@ -1513,6 +1529,23 @@ export default function App() {
                 >
                   <Plus className="h-4 w-4 text-white" />
                   <span>Start Fresh Chat</span>
+                </button>
+
+                {/* FaceSwap Chat Action */}
+                <button
+                  id="btn-sidebar-faceswap"
+                  onClick={() => {
+                    setActiveTab("faceswap");
+                    setIsSidebarOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-center gap-2 font-semibold text-xs py-3 px-4 rounded-xl active:scale-[0.98] border transition-all cursor-pointer font-sans shrink-0 ${
+                    activeTab === "faceswap"
+                      ? "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-500 shadow-md"
+                      : "bg-white hover:bg-gray-50 text-gray-700 border-gray-200 hover:border-gray-300"
+                  }`}
+                >
+                  <Sparkles className={`h-4 w-4 ${activeTab === "faceswap" ? "text-white" : "text-indigo-500"}`} />
+                  <span>FaceSwap Chat</span>
                 </button>
 
                 {/* Chat History Section */}
